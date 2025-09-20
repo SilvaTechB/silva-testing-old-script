@@ -1,4 +1,4 @@
-// Sylivanus.js - Updated: Fixed clearTmp reference error
+// Sylivanus.js - Updated: Fixed connection issues and improved error handling
 // Silva Tech Inc - crafted by Silva
 
 process.env['NODE_TLS_REJECT_UNAUTHORIZED'] = '1'
@@ -234,14 +234,24 @@ global.loadDatabase = async function loadDatabase() {
 }
 loadDatabase()
 
+// Get the latest WhatsApp version
+let version
+try {
+  const { version: latestVersion } = await fetchLatestWaWebVersion()
+  version = latestVersion
+} catch (error) {
+  console.error('Failed to fetch latest WhatsApp version, using fallback:', error)
+  version = [2, 3000, 1023223821] // Fallback version from your logs
+}
+
 // NOTE: use the 'state' and 'saveCreds' from earlier
 const connectionOptions = {
-  version: [2, 3000, 1015901307],
+  version,
   logger: Pino({
     level: 'fatal',
   }),
   printQRInTerminal: !pairingCode,
-  browser: ['chrome (linux)', '', ''],
+  browser: ['Chrome (Linux)', '', ''],
   auth: {
     creds: state.creds,
     keys: makeCacheableSignalKeyStore(
@@ -337,6 +347,10 @@ conn.ev.on('connection.update', async update => {
   try {
     const { connection, lastDisconnect, qr } = update
 
+    if (qr) {
+      console.log(chalk.yellow('Scan the QR code above to login'))
+    }
+
     if (connection === 'open') {
       console.log(chalk.green('✅ WhatsApp connected!'))
 
@@ -369,7 +383,15 @@ conn.ev.on('connection.update', async update => {
         lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut
       console.log('❌ WhatsApp disconnected. Reconnect:', shouldReconnect)
       if (shouldReconnect) {
-        // let reloadHandler or reconnect handle it; here we simply log
+        // Try to reconnect after a delay
+        setTimeout(() => {
+          try {
+            global.conn = makeWASocket(connectionOptions)
+            store?.bind(conn.ev)
+          } catch (error) {
+            console.error('Failed to reconnect:', error)
+          }
+        }, 5000)
       }
     }
   } catch (e) {
@@ -394,23 +416,6 @@ if (!opts['test']) {
 }
 
 if (opts['server']) (await import('./server.js')).default(global.conn, PORT)
-
-// Remove the problematic runCleanup function since clearTmp is not defined
-// function runCleanup() {
-//   clearTmp()
-//     .then(() => {
-//       console.log('Temporary file cleanup completed.')
-//     })
-//     .catch(error => {
-//       console.error('An error occurred during temporary file cleanup:', error)
-//     })
-//     .finally(() => {
-//       // 2 minutes
-//       setTimeout(runCleanup, 1000 * 60 * 2)
-//     })
-// }
-
-// runCleanup()
 
 function clearsession() {
   let prekey = []
@@ -467,6 +472,7 @@ async function connectionUpdate(update) {
 }
 
 process.on('uncaughtException', console.error)
+process.on('unhandledRejection', console.error)
 
 let isInit = true
 let handler = await import('./handler.js')
