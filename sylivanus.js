@@ -1,4 +1,4 @@
-// Sylivanus.js - Updated: embedded session restore/generate (no lib/makesession.js)
+// Sylivanus.js - Updated: Fixed clearTmp reference error
 // Silva Tech Inc - crafted by Silva
 
 process.env['NODE_TLS_REJECT_UNAUTHORIZED'] = '1'
@@ -12,6 +12,8 @@ import { platform } from 'process'
 import { fileURLToPath, pathToFileURL } from 'url'
 import * as ws from 'ws'
 import { EventEmitter } from 'events'
+import os from 'os'
+import cp from 'child_process'
 
 // Suppress MaxListenersExceededWarning
 EventEmitter.defaultMaxListeners = Infinity
@@ -393,21 +395,22 @@ if (!opts['test']) {
 
 if (opts['server']) (await import('./server.js')).default(global.conn, PORT)
 
-function runCleanup() {
-  clearTmp()
-    .then(() => {
-      console.log('Temporary file cleanup completed.')
-    })
-    .catch(error => {
-      console.error('An error occurred during temporary file cleanup:', error)
-    })
-    .finally(() => {
-      // 2 minutes
-      setTimeout(runCleanup, 1000 * 60 * 2)
-    })
-}
+// Remove the problematic runCleanup function since clearTmp is not defined
+// function runCleanup() {
+//   clearTmp()
+//     .then(() => {
+//       console.log('Temporary file cleanup completed.')
+//     })
+//     .catch(error => {
+//       console.error('An error occurred during temporary file cleanup:', error)
+//     })
+//     .finally(() => {
+//       // 2 minutes
+//       setTimeout(runCleanup, 1000 * 60 * 2)
+//     })
+// }
 
-runCleanup()
+// runCleanup()
 
 function clearsession() {
   let prekey = []
