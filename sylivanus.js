@@ -1,8 +1,11 @@
+// Sylivanus.js - Updated: embedded session restore/generate (no lib/makesession.js)
+// Silva Tech Inc - crafted by Silva
+
 process.env['NODE_TLS_REJECT_UNAUTHORIZED'] = '1'
 import './config.js'
 
 import dotenv from 'dotenv'
-import { existsSync, readFileSync, readdirSync, unlinkSync, watch } from 'fs'
+import { existsSync, readFileSync, readdirSync, unlinkSync, watch, writeFileSync, mkdirSync } from 'fs'
 import { createRequire } from 'module'
 import path, { join } from 'path'
 import { platform } from 'process'
@@ -12,8 +15,7 @@ import { EventEmitter } from 'events'
 
 // Suppress MaxListenersExceededWarning
 EventEmitter.defaultMaxListeners = Infinity
-import processTxtAndSaveCredentials from './lib/makesession.js'
-import clearTmp from './lib/tempclear.js'
+
 global.__filename = function filename(pathURL = import.meta.url, rmPrefix = platform !== 'win32') {
   return rmPrefix
     ? /file:\/\/\//.test(pathURL)
@@ -61,25 +63,39 @@ import readline from 'readline'
 
 dotenv.config()
 
-async function main() {
-  const txt = process.env.SESSION_ID
+// ---- START: Session restore / generation (embedded) ----
+global.authFolder = `session`
+const sessionPath = path.join(global.authFolder, 'creds.json')
 
-  if (!txt) {
-    console.error('Environment variable not found.')
-    return
-  }
+// If creds file doesn't exist but SESSION_ID is provided in .env, restore it
+if (!existsSync(sessionPath)) {
+  if (process.env.SESSION_ID && process.env.SESSION_ID.startsWith('Silva~')) {
+    try {
+      const creds = Buffer.from(
+        process.env.SESSION_ID.replace('Silva~', ''),
+        'base64'
+      ).toString('utf-8')
 
-  try {
-    await processTxtAndSaveCredentials(txt)
-    console.log('processTxtAndSaveCredentials completed.')
-  } catch (error) {
-    console.error('Error:', error)
+      mkdirSync(path.dirname(sessionPath), { recursive: true })
+      writeFileSync(sessionPath, creds, 'utf8')
+      console.log(chalk.green('✅ Session restored from SESSION_ID in environment'))
+    } catch (e) {
+      console.error(chalk.red('Failed to restore session from SESSION_ID:'), e)
+    }
   }
 }
+// ---- END: Session restore / generation ----
 
-main()
+const { state, saveCreds } = await useMultiFileAuthState(global.authFolder)
+//let { version, isLatest } = await fetchLatestWaWebVersion()
 
-await delay(1000 * 10)
+async function mainGuardDelay() {
+  // small, non-blocking no-op guard - kept to mirror your earlier delay usage if needed
+  try {
+    await delay?.(1000 * 1)
+  } catch {}
+}
+await mainGuardDelay()
 
 async function gandu() {
   try {
@@ -215,10 +231,8 @@ global.loadDatabase = async function loadDatabase() {
   global.db.chain = chain(global.db.data)
 }
 loadDatabase()
-global.authFolder = `session`
-const { state, saveCreds } = await useMultiFileAuthState(global.authFolder)
-//let { version, isLatest } = await fetchLatestWaWebVersion()
 
+// NOTE: use the 'state' and 'saveCreds' from earlier
 const connectionOptions = {
   version: [2, 3000, 1015901307],
   logger: Pino({
@@ -274,6 +288,7 @@ global.conn = makeWASocket(connectionOptions)
 conn.isInit = false
 store?.bind(conn.ev)
 
+// If pairing mode requested: phone pairing flow
 if (pairingCode && !conn.authState.creds.registered) {
   let phoneNumber
   if (!!global.pairingNumber) {
@@ -307,13 +322,61 @@ if (pairingCode && !conn.authState.creds.registered) {
   setTimeout(async () => {
     let code = await conn.requestPairingCode(phoneNumber)
     code = code?.match(/.{1,4}/g)?.join('-') || code
-    const pairingCode =
+    const pairingCodeStr =
       chalk.bold.greenBright('Your Pairing Code:') + ' ' + chalk.bgGreenBright(chalk.black(code))
-    console.log(pairingCode)
+    console.log(pairingCodeStr)
   }, 3000)
 }
 
 conn.logger.info('\nWaiting For Login please redeploy if it doesnt work\n')
+
+// Automatically generate and show SESSION_ID after successful open (if not present in ENV)
+conn.ev.on('connection.update', async update => {
+  try {
+    const { connection, lastDisconnect, qr } = update
+
+    if (connection === 'open') {
+      console.log(chalk.green('✅ WhatsApp connected!'))
+
+      // If .env lacks SESSION_ID, read creds and print Silva~ base64 to console for copy/paste
+      if (!process.env.SESSION_ID) {
+        try {
+          if (existsSync(sessionPath)) {
+            const credsFile = readFileSync(sessionPath, 'utf8')
+            const encoded = Buffer.from(credsFile).toString('base64')
+            const sessionId = `Silva~${encoded}`
+
+            console.log(chalk.bold.greenBright('\n💾 Your new SESSION_ID:'))
+            console.log(chalk.bgGreenBright(chalk.black(sessionId)))
+            console.log(
+              chalk.yellow(
+                '\nCopy this SESSION_ID into your .env (SESSION_ID="Silva~...") for future auto-login.\n'
+              )
+            )
+          } else {
+            console.log(chalk.yellow('creds.json not found to generate SESSION_ID'))
+          }
+        } catch (e) {
+          console.error('Failed to generate SESSION_ID:', e)
+        }
+      }
+    }
+
+    if (connection === 'close') {
+      const shouldReconnect =
+        lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut
+      console.log('❌ WhatsApp disconnected. Reconnect:', shouldReconnect)
+      if (shouldReconnect) {
+        // let reloadHandler or reconnect handle it; here we simply log
+      }
+    }
+  } catch (e) {
+    console.error('Error in connection.update handler:', e)
+  }
+})
+
+// Save creds on update
+conn.ev.on('creds.update', saveCreds)
 
 if (!opts['test']) {
   if (global.db) {
@@ -519,7 +582,7 @@ global.reload = async (_ev, filename) => {
         const module = await import(`${global.__filename(dir)}?update=${Date.now()}`)
         global.plugins[filename] = module.default || module
       } catch (e) {
-        conn.logger.error(`\nError require plugin '${filename}\n${format(e)}'`)
+        conn.logger.error(`\nError require plugin '${filename}\n${format(e)}`)
       } finally {
         global.plugins = Object.fromEntries(
           Object.entries(global.plugins).sort(([a], [b]) => a.localeCompare(b))
@@ -590,6 +653,5 @@ _quickTest().catch(console.error)
 
 //..
 //silva tech inc product
-
 
 // code crafted by silva
